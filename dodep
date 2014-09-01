@@ -1,0 +1,8 @@
+#!/bin/bash
+rm -f dodep.tmp
+while read -r package; do
+echo "Doing deps for "$package
+./dep "$package" >> dodep.tmp
+done < dodeplist
+sort -u dodep.tmp > dodep.out
+#rm -f dodep.tmp
