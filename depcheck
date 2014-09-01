@@ -1,0 +1,261 @@
+#!/bin/bash
+# First attempt at a script to work out anything needing
+# to be linked from core/release to core/updates to work
+# around bug 2317.
+#
+# Version 0.7 by MrsB & Stormi
+#
+# Syntax: SCRIPT PACKAGE MEDIA1 MEDIA2
+#
+# If run as SCRIPT PACKAGE it will list the media where
+# PACKAGE is available and the different versions but it
+# cannot currently associate a version to a particular
+# media.
+#
+# SCRIPT PACKAGE MEDIA1 will find recursive dependencies
+# for a new package not fulfilled by a base system.
+# They need to be checked against the MDV package for new
+# dependencies.
+#
+# Also SCRIPT or SCRIPT --help will show a help text
+#
+# ToDo: 
+# - Add Comments. 
+# - Add conditional for Backports which is currently 
+#   excluded.
+# - use getopts to enable more options/flexibility
+
+helptext="Syntax: `basename $0` PACKAGE [MEDIA1 MEDIA2]
+
+This script enables you to check exactly what packages will need
+linking from release media to update media to workaround bug 2317.
+It checks against a minimal system which packages are required
+from release media.
+
+PACKAGE is the package you want to check
+MEDIA1 is the release media name
+	eg: \"Core Release\" or \"Core Updates\"
+MEDIA2 is the testing media name
+	eg: \"Core Updates Testing\"
+
+If called without any arguements or with --help it
+will display this help text.
+
+Media names with spaces should be in double quotes as shown above.
+If you don't know the names of your media you can list them with:
+
+urpmq --list-media
+
+If called without MEDIA1 & MEDIA2 as `basename $0` PACKAGE
+it will list the media where the package appears and list which
+versions of the package are available."
+
+# list all media that could be needed
+IFS=$'\n';
+medialist=
+for x in $(urpmq --wait-lock --list-media | grep -v "Debug")
+do
+  medialist=$medialist$x,
+done
+medialist=$(echo $medialist | sed 's/,$//')
+
+# Test whether MEDIA2 argument is present (non-empty).
+if [ -n "$3" ]; then 
+  package=$1
+  media1=$2
+  media2=$3
+  allmedia=`urpmq --wait-lock --list-media`
+  m1test=`echo -e "$allmedia" | grep -x "$media1"`
+  m2test=`echo -e "$allmedia" | grep -x "$media2"`
+  if [ "$m1test" != "$media1" ]; then
+   echo -e "Oops! Media \"$media1\" does not exist."
+   exit
+  fi
+  if [ "$m2test" != "$media2" ]; then
+   echo -e "Oops! Media \"$media2\" does not exist."
+   exit
+  fi
+  echo "----------------------------------------"
+  echo "Running checks for \"$package\" using media"
+  echo "\"$media1\" and \"$media2\"."
+  echo "----------------------------------------"
+  cat /etc/release
+  version1=`urpmq --wait-lock -r --media "$media1" --list | grep -e ^$package-[0-9]`
+  if [ -n "$version1" ]; then
+   version1latest=`echo -e "$version1" | sort -V -r | head -n 1`
+   echo "Latest version found in \"$media1\" is $version1latest"
+  else
+   echo "*** Error: \"$package\" not found in \"$media1\""
+   echo "----------------------------------------"
+   exit
+  fi
+  version2=`urpmq --wait-lock -r --media "$media2" --list | grep -e ^$package-[0-9]`
+  if [ -n "$version2" ]; then
+   version2latest=`echo -e "$version2" | sort -V -r | head -n 1`
+   echo "Latest version found in \"$media2\" is $version2latest"
+  else
+   echo "*** Error: \"$package\" not found in \"$media2\""
+   echo "----------------------------------------"
+   exit
+  fi
+  echo "----------------------------------------"
+
+
+  mkdir -p ~/tmp/depcheck
+  cd ~/tmp/depcheck
+#  urpmq --wait-lock --requires-recursive --no-suggests --media "$medialist" --excludemedia Backports $version1latest > old.txt
+urpmq --wait-lock --requires-recursive --media "$medialist" --excludemedia Backports $version1latest | tr '|' '\n' > old.txt
+#  urpmq --wait-lock --requires-recursive --no-suggests --media "$medialist" --excludemedia Backports $version2latest | sort > new.txt
+urpmq --wait-lock --requires-recursive --media "$medialist" --excludemedia Backports $version2latest | tr '|' '\n' | sort -u > new.txt
+# If testing something in a Testing media we need to check Testing
+# media to see if deps are there. If testing something in non Testing
+# media we need to exclude them as any deps will be in Release or Updates.
+  testing=`grep Testing <(echo "$media2")`
+  if [ -n "$testing" ]; then
+#   echo "Testing media"
+   urpmq --wait-lock --list --media Updates > updates.txt
+  else
+#   echo "Non Testing media"
+   urpmq --wait-lock --list --media Updates --excludemedia Testing > updates.txt
+  fi
+  urpmq --wait-lock --requires-recursive --no-suggests basesystem-minimal | tr '|' '\n' > basesystem.txt
+  urpmq --wait-lock --requires-recursive --no-suggests rpmdrake | tr '|' '\n' > rpmdrake.txt
+  urpmq --wait-lock --requires-recursive --no-suggests x11-server | tr '|' '\n' > x11server.txt
+  urpmq --wait-lock --requires-recursive --no-suggests x11-driver-video | tr '|' '\n' > x11driver.txt
+  sort -u old.txt updates.txt basesystem.txt rpmdrake.txt x11server.txt x11driver.txt > already_available.txt
+  finished=`comm -23 --check-order new.txt already_available.txt`
+# If links are needed..
+  if [ -n "$finished" ]; then
+#   nopipes=`echo "$finished" | tr '|' '\n'`
+   echo -e "The following packages will require linking:\n"
+#   echo "$finished"
+   trfinished=`echo "$finished" | tr '|' '\n'`
+# List the links and the media they can be found in
+   for linkreq in $trfinished
+   do
+#    echo "---------------------"
+#    echo "Link required: $linkreq"
+    result=`urpmf --wait-lock -m --media "$medialist" --excludemedia Backports $linkreq`
+    medias=`echo -e "$result" | awk -F: -v linkreq="$linkreq" '{ if ($1 == linkreq ) print $2 }'`
+    nodupes=`echo "$medias" | sort -u`
+    for media in $nodupes
+    do
+     hits=`urpmq --wait-lock -r --media "$media" $linkreq | tr '|' '\n'`
+     hitssorted=`echo "$hits" | sort -V`
+#     echo "Media: $media"
+#     echo "Versions: $hitssorted"
+    echo "$hitssorted ($media)"
+    done
+   done
+  else
+   echo "No packages require linking. Phew!"
+  fi
+  echo -e "----------------------------------------\nDone."
+  rm -rf ~/tmp/depcheck
+
+
+
+elif [ -n "$2" ]; then
+  package=$1
+  media1=$2
+  allmedia=`urpmq --wait-lock --list-media`
+  mtest=`echo -e "$allmedia" | grep -x "$media1"`
+  if [ "$mtest" != "$media1" ]; then
+   echo -e "Oops! Media \"$media1\" does not exist."
+   exit
+  fi
+  echo "Check with $package and \"$media1\""
+  version1=`urpmq --wait-lock -r --media "$media1" --list | grep -e ^$package-[0-9]`
+  if [ -n "$version1" ]; then
+   version1latest=`echo -e "$version1" | sort -V -r | head -n 1`
+   echo "Latest version found in \"$media1\" is $version1latest"
+  else
+   echo "*** Error: \"$package\" not found in \"$media1\""
+   echo "----------------------------------------"
+   exit
+  fi
+  echo "----------------------------------------"
+ 
+  mkdir -p ~/tmp/depcheck
+  cd ~/tmp/depcheck
+  urpmq --wait-lock --requires-recursive --no-suggests --media "$medialist" --excludemedia Backports $version1latest | sort > new.txt
+# If testing something in a Testing media we need to check Testing
+# media to see if deps are there. If testing something in non Testing
+# media we need to exclude them as any deps will be in Release or Updates.
+  testing=`grep Testing <(echo "$media1")`
+  if [ -n "$testing" ]; then
+#   echo "Testing media"
+   urpmq --wait-lock --list --media Updates > updates.txt
+  else
+#   echo "Non Testing media"
+   urpmq --wait-lock --list --media Updates --excludemedia Testing > updates.txt
+  fi
+  urpmq --wait-lock --requires-recursive --no-suggests basesystem-minimal > basesystem.txt
+  urpmq --wait-lock --requires-recursive --no-suggests rpmdrake > rpmdrake.txt
+  urpmq --wait-lock --requires-recursive --no-suggests x11-server > x11server.txt
+  urpmq --wait-lock --requires-recursive --no-suggests x11-driver-video > x11driver.txt
+  sort -u updates.txt basesystem.txt rpmdrake.txt x11server.txt x11driver.txt > already_available.txt
+  finished=`comm -23 new.txt already_available.txt`
+# If links are needed..
+  if [ -n "$finished" ]; then
+   nopipes=`echo "$finished" | tr '|' '\n'`
+   totalnumber=`echo "$nopipes" | tr -dc '\n' | wc -c`
+   echo "$finished"
+   echo "---------------------"
+   echo "The "$totalnumber" packages above may require linking to enable smooth"
+   echo "upgrade from Mandriva 2010. They should be compared against the"
+   echo "Mandriva package with Sophie."
+   echo "This is an exhaustively recursive list which lists the dependencies of"
+   echo "the dependencies etc which aren't provided by a minimal install."
+#   trfinished=`echo "$finished" | tr '|' '\n'`
+# List the links and the media they can be found in
+#   for linkreq in $trfinished
+#   do
+#    echo "---------------------"
+#    echo "Link required: $linkreq"
+#    result=`urpmf --wait-lock -m --media "$medialist" --excludemedia Backports $linkreq`
+#    medias=`echo -e "$result" | awk -F: -v linkreq="$linkreq" '{ if ($1 == linkreq ) print $2 }'`
+#    nodupes=`echo "$medias" | sort -u`
+#    for media in $nodupes
+#    do
+#     hits=`urpmq --wait-lock -r --media "$media" $linkreq | tr '|' '\n'`
+#     hitssorted=`echo "$hits" | sort -V`
+#     echo "Media: $media"
+#     echo "Versions: $hitssorted"
+#    done 
+#   done
+  else
+   echo "No packages require linking. Phew!"
+  fi
+  echo -e "----------------------------------------\nDone."
+  rm -rf ~/tmp/depcheck
+
+
+elif [ -n "$1" ]; then
+ if [ "$1" = "--help" ]; then
+  echo "$helptext"
+ else
+  package=$1
+  cat /etc/release
+  results=`urpmf --wait-lock -m --media "$medialist" $package 2>/dev/null`
+  if [[ -n $results ]]; then
+   medias=`echo -e "$results" | awk -F: -v package="$package" '{ if ($1 == package ) print $2 }'`
+   nodupes=`echo "$medias" | sort -u`
+   echo "------------------"
+   for media in $nodupes
+   do
+    hits=`urpmq --wait-lock -r --media "$media" $package | tr '|' '\n'`
+    hitssorted=`echo "$hits" | sort -V`
+    echo "$media"
+    echo "$hitssorted"
+    echo "------------------"
+   done
+  else
+   echo "$package not found, please check the package name is correct"
+   exit
+  fi
+ fi
+else
+  echo "$helptext"
+fi  
+
