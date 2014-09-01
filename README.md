@@ -36,3 +36,5 @@ eg.
 	thunderbird-24.7.0-1.mga4
 	------------------
 
+dep is just a shortcut for depcheck with common options and dodep uses dep but takes a list of packages from a file
+which was useful for larger updates. All now defunct. 
