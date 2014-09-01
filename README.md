@@ -1,4 +1,5 @@
-=depcheck=
+depcheck
+========
 
 Depcheck was hastily hacked together, rehacked, changed, tweaked and expanded in a horendously messy way.
 
